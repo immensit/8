@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>Air Paint & ESP32 RGB Control</title>
+  <!-- MediaPipe Hands CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+    body { font-family: 'Pretendard', sans-serif; background: #121212; color: #fff; overflow: hidden; }
+
+    /* 시작 화면 모달 */
+    #startModal {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.85);
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      z-index: 100; backdrop-filter: blur(8px);
+    }
+    .modal-card {
+      background: #1e1e2f; padding: 30px; border-radius: 20px;
+      max-width: 520px; text-align: center; border: 1px solid #333; box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+    .modal-card h1 { color: #ff007f; margin-bottom: 15px; font-size: 26px; }
+    .guide-list { text-align: left; background: #2a2a3d; padding: 15px 20px; border-radius: 12px; margin: 15px 0; font-size: 14px; line-height: 1.8; }
+    .btn-start {
+      background: linear-gradient(45deg, #ff007f, #7f00ff); border: none;
+      color: white; padding: 12px 35px; font-size: 18px; font-weight: bold;
+      border-radius: 30px; cursor: pointer; transition: 0.3s; margin-top: 10px;
+    }
+    .btn-start:hover { transform: scale(1.05); }
+
+    /* 메인 작업 화면 */
+    #appContainer { display: flex; width: 100vw; height: 100vh; position: relative; }
+    #viewport { flex: 1; position: relative; overflow: hidden; background: #1a1a1a; }
+    #canvas { background: #ffffff; position: absolute; left: 0; top: 0; }
+
+    /* 웹캠 HUD */
+    #camContainer {
+      position: absolute; bottom: 20px; right: 20px; width: 200px; height: 150px;
+      border-radius: 12px; overflow: hidden; border: 2px solid #ff007f; background: #000; z-index: 10;
+    }
+    #webcam { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+
+    /* 상단 메뉴바 */
+    #topBar {
+      position: absolute; top: 20px; left: 20px; z-index: 10; display: flex; gap: 15px; align-items: center;
+      background: rgba(0,0,0,0.75); padding: 10px 20px; border-radius: 30px; backdrop-filter: blur(5px);
+    }
+    .btn-serial {
+      background: #00e676; border: none; padding: 8px 16px; border-radius: 20px;
+      color: #000; font-weight: bold; cursor: pointer;
+    }
+    .color-preview { width: 22px; height: 22px; border-radius: 50%; border: 2px solid white; display: inline-block; vertical-align: middle; }
+
+    /* UI 오버레이 */
+    .overlay-tool {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      display: none; z-index: 20; pointer-events: none;
+    }
+    
+    #paletteContainer { width: 260px; height: 260px; border-radius: 50%; border: 4px solid #fff; position: relative; box-shadow: 0 0 25px rgba(255,255,255,0.5); }
+    #colorWheel { width: 100%; height: 100%; border-radius: 50%; }
+
+    #toolMenu {
+      background: rgba(20,20,35,0.95); padding: 15px 25px; border-radius: 20px;
+      display: flex; gap: 15px; border: 2px solid #7f00ff;
+    }
+    .tool-item { padding: 10px 18px; border-radius: 12px; font-weight: bold; background: #2a2a3d; color: #aaa; }
+    .tool-item.active { background: #ff007f; color: white; scale: 1.1; }
+
+    /* 손 커서 및 둥둥 떠다니는 3D 붓 */
+    #handCursor {
+      position: absolute; width: 16px; height: 16px; border-radius: 50%;
+      border: 2px solid white; background: rgba(255,0,127,0.8);
+      pointer-events: none; transform: translate(-50%, -50%); z-index: 30; display: none;
+    }
+
+    #floatingBrush {
+      position: absolute; font-size: 36px; pointer-events: none; z-index: 35; display: none;
+      filter: drop-shadow(3px 5px 5px rgba(0,0,0,0.5));
+      animation: floatAnimation 1.8s ease-in-out infinite;
+    }
+
+    @keyframes floatAnimation {
+      0%, 100% { transform: translate(15px, -35px) rotate(0deg); }
+      50% { transform: translate(15px, -45px) rotate(12deg); }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 시작 설명창 -->
+  <div id="startModal">
+    <div class="modal-card">
+      <h1>🎨 Air Paint & ESP32 RGB Catcher</h1>
+      <p>공중 손동작으로 그림을 그리고 ESP32 RGB 모듈을 빛내보세요!</p>
+      
+      <div class="guide-list">
+        ✋ <b>손바닥 펼치기:</b> RGB 팔레트 열기 및 붓 색상 선택<br>
+        ☝️ <b>검지만 펴기:</b> 공중 붓으로 캔버스에 그림 그리기<br>
+        ✊ <b>주먹 쥐기:</b> <b>선택한 색상을 ESP32 RGB 모듈에 빛내기</b><br>
+        ✌️ <b>V자 (검지+중지):</b> 도구 선택 (색연필/크레용/잉크/붓/페인트통)
+      </div>
+
+      <button class="btn-start" onclick="startGame()">하얀 캔버스 시작하기</button>
+    </div>
+  </div>
+
+  <!-- 메인 작업 영역 -->
+  <div id="appContainer">
+    <div id="topBar">
+      <button class="btn-serial" onclick="connectESP32()">🔌 ESP32(Python) 연결</button>
+      <span>현재 붓 색상: <span id="colorBox" class="color-preview" style="background:#ff0000;"></span></span>
+      <span>도구: <strong id="currentToolText">붓</strong></span>
+      <span>제스처: <strong id="gestureStatus">대기중</strong></span>
+    </div>
+
+    <div id="viewport">
+      <canvas id="canvas"></canvas>
+    </div>
+
+    <div id="camContainer">
+      <video id="webcam" autoplay playsinline></video>
+    </div>
+
+    <!-- RGB 팔레트 오버레이 -->
+    <div id="paletteOverlay" class="overlay-tool">
+      <div id="paletteContainer">
+        <canvas id="colorWheel" width="260" height="260"></canvas>
+      </div>
+    </div>
+
+    <!-- 도구 선택 오버레이 -->
+    <div id="toolOverlay" class="overlay-tool">
+      <div id="toolMenu">
+        <div class="tool-item" id="tool-0">색연필</div>
+        <div class="tool-item" id="tool-1">크레용</div>
+        <div class="tool-item" id="tool-2">잉크펜</div>
+        <div class="tool-item active" id="tool-3">붓</div>
+        <div class="tool-item" id="tool-4">페인트통</div>
+      </div>
+    </div>
+
+    <!-- 손 포인터 & 떠다니는 붓 아이콘 -->
+    <div id="handCursor"></div>
+    <div id="floatingBrush">🖌️</div>
+  </div>
+
+  <script>
+    let canvas, ctx;
+    let currentColorRGB = { r: 255, g: 0, b: 0 };
+    let tools = ['색연필', '크레용', '잉크펜', '붓', '페인트통'];
+    let selectedToolIdx = 3;
+    let isDrawing = false;
+    let lastX = 0, lastY = 0;
+    
+    // 시리얼 전송 쓰로틀링 변수
+    let serialPort = null, serialWriter = null;
+    let isSending = false;
+    let lastSendTime = 0;
+
+    function startGame() {
+      document.getElementById('startModal').style.display = 'none';
+      canvas = document.getElementById('canvas');
+      ctx = canvas.getContext('2d');
+      
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      drawColorWheel();
+      initMediaPipe();
+    }
+
+    function drawColorWheel() {
+      const wheelCanvas = document.getElementById('colorWheel');
+      const wCtx = wheelCanvas.getContext('2d');
+      const r = wheelCanvas.width / 2;
+      
+      for (let x = -r; x < r; x++) {
+        for (let y = -r; y < r; y++) {
+          let dist = Math.sqrt(x*x + y*y);
+          if (dist < r && dist > r * 0.35) {
+            let angle = Math.atan2(y, x) + Math.PI;
+            let hue = (angle / (2 * Math.PI)) * 360;
+            wCtx.fillStyle = `hsl(${hue}, 100%, 50%)`;
+            wCtx.fillRect(x + r, y + r, 1, 1);
+          }
+        }
+      }
+    }
+
+    function initMediaPipe() {
+      const videoElement = document.getElementById('webcam');
+      const hands = new Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+      });
+
+      hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.7
+      });
+
+      hands.onResults(onHandResults);
+
+      const camera = new Camera(videoElement, {
+        onFrame: async () => { await hands.send({ image: videoElement }); },
+        width: 640, height: 480
+      });
+      camera.start();
+    }
+
+    function getGesture(lm) {
+      const isIndex = lm[8].y < lm[6].y;
+      const isMiddle = lm[12].y < lm[10].y;
+      const isRing = lm[16].y < lm[14].y;
+      const isPinky = lm[20].y < lm[18].y;
+
+      if (isIndex && isMiddle && isRing && isPinky) return 'PALM';
+      if (!isIndex && !isMiddle && !isRing && !isPinky) return 'FIST';
+      if (isIndex && !isMiddle && !isRing && !isPinky) return 'INDEX';
+      if (isIndex && isMiddle && !isRing && !isPinky) return 'V_SIGN';
+      return 'UNKNOWN';
+    }
+
+    function onHandResults(results) {
+      const cursor = document.getElementById('handCursor');
+      const brush = document.getElementById('floatingBrush');
+      const statusText = document.getElementById('gestureStatus');
+
+      if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+        cursor.style.display = 'none';
+        brush.style.display = 'none';
+        statusText.innerText = '손 없음';
+        isDrawing = false;
+        return;
+      }
+
+      cursor.style.display = 'block';
+      const lm = results.multiHandLandmarks[0];
+      const gesture = getGesture(lm);
+      statusText.innerText = gesture;
+
+      const canvasX = (1 - lm[8].x) * window.innerWidth;
+      const canvasY = lm[8].y * window.innerHeight;
+
+      cursor.style.left = `${canvasX}px`;
+      cursor.style.top = `${canvasY}px`;
+      brush.style.left = `${canvasX}px`;
+      brush.style.top = `${canvasY}px`;
+
+      // 1. [✋ 손바닥]: 원형 팔레트 열기 및 붓 색상 선택
+      if (gesture === 'PALM') {
+        isDrawing = false;
+        brush.style.display = 'none';
+        document.getElementById('paletteOverlay').style.display = 'block';
+        document.getElementById('toolOverlay').style.display = 'none';
+        pickPaletteColor(canvasX, canvasY);
+      }
+
+      // 2. [☝️ 검지]: 떠다니는 붓으로 공중 그림 그리기
+      else if (gesture === 'INDEX') {
+        closeOverlays();
+        brush.style.display = 'block';
+
+        if (tools[selectedToolIdx] === '페인트통') {
+          ctx.fillStyle = `rgb(${currentColorRGB.r}, ${currentColorRGB.g}, ${currentColorRGB.b})`;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        } else {
+          if (!isDrawing) {
+            isDrawing = true;
+            lastX = canvasX; lastY = canvasY;
+          } else {
+            drawOnCanvas(lastX, lastY, canvasX, canvasY);
+            lastX = canvasX; lastY = canvasY;
+          }
+        }
+      }
+
+      // 3. [✊ 주먹]: 선택된 색상을 ESP32 RGB 모듈에 출력
+      else if (gesture === 'FIST') {
+        isDrawing = false;
+        brush.style.display = 'none';
+        closeOverlays();
+        
+        sendToESP32(currentColorRGB.r, currentColorRGB.g, currentColorRGB.b);
+      }
+
+      // 4. [✌️ V자]: 도구 메뉴
+      else if (gesture === 'V_SIGN') {
+        isDrawing = false;
+        brush.style.display = 'none';
+        document.getElementById('paletteOverlay').style.display = 'none';
+        document.getElementById('toolOverlay').style.display = 'block';
+        selectToolByPosition(canvasX);
+      } else {
+        isDrawing = false;
+        brush.style.display = 'none';
+      }
+    }
+
+    function drawOnCanvas(x1, y1, x2, y2) {
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+
+      const tool = tools[selectedToolIdx];
+      const strokeColor = `rgb(${currentColorRGB.r}, ${currentColorRGB.g}, ${currentColorRGB.b})`;
+
+      if (tool === '색연필') {
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = 3;
+        ctx.globalAlpha = 0.7;
+        ctx.stroke();
+      } else if (tool === '크레용') {
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = 14;
+        ctx.lineCap = 'round';
+        ctx.globalAlpha = 0.8;
+        ctx.stroke();
+      } else if (tool === '잉크펜') {
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = 4;
+        ctx.lineCap = 'round';
+        ctx.globalAlpha = 1.0;
+        ctx.stroke();
+      } else if (tool === '붓') {
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = 12;
+        ctx.lineCap = 'round';
+        ctx.globalAlpha = 0.5;
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1.0;
+    }
+
+    function pickPaletteColor(x, y) {
+      const wheelCanvas = document.getElementById('colorWheel');
+      const rect = wheelCanvas.getBoundingClientRect();
+      const wx = x - rect.left;
+      const wy = y - rect.top;
+
+      if (wx >= 0 && wx < rect.width && wy >= 0 && wy < rect.height) {
+        const wCtx = wheelCanvas.getContext('2d');
+        const p = wCtx.getImageData(wx, wy, 1, 1).data;
+        if (p[3] > 0) {
+          currentColorRGB = { r: p[0], g: p[1], b: p[2] };
+          document.getElementById('colorBox').style.background = `rgb(${p[0]}, ${p[1]}, ${p[2]})`;
+        }
+      }
+    }
+
+    function selectToolByPosition(x) {
+      const toolWidth = window.innerWidth / tools.length;
+      let idx = Math.floor(x / toolWidth);
+      selectedToolIdx = Math.max(0, Math.min(tools.length - 1, idx));
+
+      document.querySelectorAll('.tool-item').forEach((el, i) => {
+        el.classList.toggle('active', i === selectedToolIdx);
+      });
+      document.getElementById('currentToolText').innerText = tools[selectedToolIdx];
+    }
+
+    function closeOverlays() {
+      document.getElementById('paletteOverlay').style.display = 'none';
+      document.getElementById('toolOverlay').style.display = 'none';
+    }
+
+    async function connectESP32() {
+      try {
+        serialPort = await navigator.serial.requestPort();
+        await serialPort.open({ baudRate: 115200 });
+        serialWriter = serialPort.writable.getWriter();
+        alert('ESP32 MicroPython 시리얼 연결 성공!');
+      } catch (e) {
+        alert('연결 실패: ' + e);
+      }
+    }
+
+    async function sendToESP32(r, g, b) {
+      const now = Date.now();
+      if (!serialWriter || isSending || (now - lastSendTime < 100)) return;
+
+      isSending = true;
+      try {
+        const data = new TextEncoder().encode(`RGB:${r},${g},${b}\n`);
+        await serialWriter.write(data);
+        lastSendTime = now;
+      } catch (e) {
+        console.error("전송 에러:", e);
+      } finally {
+        isSending = false;
+      }
+    }
+  </script>
+</body>
+</html>
